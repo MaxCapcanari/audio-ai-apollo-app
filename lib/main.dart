@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const MyApp());
@@ -41,6 +42,19 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
   Future<void> _startScan() async {
     _latestByDevice.clear();
     setState(() {});
+
+    // Request permissions
+  final statuses = await [
+    Permission.bluetoothScan,
+    Permission.bluetoothConnect,
+    Permission.location,
+  ].request();
+
+  // Check if scan permission granted
+  if (!statuses[Permission.bluetoothScan]!.isGranted) {
+    print("Bluetooth scan permission denied");
+    return;
+  }
 
     await FlutterBluePlus.stopScan();
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
