@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 
 void main() {
   runApp(const MyApp());
@@ -63,11 +65,24 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
   Future<void> _startScan() async {
     if (kIsWeb) return;
 
+    final permissions = await [
+    Permission.bluetoothScan,
+    Permission.bluetoothConnect,
+    Permission.locationWhenInUse,
+    ].request();
+
+    if (!permissions[Permission.bluetoothScan]!.isGranted) {
+      print("Bluetooth permission denied");
+      return;
+    }
+
     _latestByDevice.clear();
     setState(() {});
 
     await FlutterBluePlus.stopScan();
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6),
+                                    androidUsesFineLocation: true);
+    
   }
 
   Future<void> _openSettings() async {
@@ -157,7 +172,13 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                       title: Text(name),
                       subtitle: Text(r.device.remoteId.str),
                       trailing: Text('${r.rssi} dBm'),
-                      onTap: () {},
+                      onTap: () {
+                        final device = r.device;
+                        Navigator.push(context, 
+                        MaterialPageRoute(
+                          builder: (_) => DeviceInfoPage(device: device),
+                        ));
+                      },
                     );
                   },
                 );
@@ -249,6 +270,104 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+
+/* ============================
+   Connecting to Device
+   ============================ */
+
+class DeviceInfoPage extends StatefulWidget {
+  final BluetoothDevice device;
+  
+  const DeviceInfoPage({super.key, required this.device});
+
+  @override
+  State<DeviceInfoPage> createState() => _DeviceInfoPageState();
+}
+
+class _DeviceInfoPageState extends State<DeviceInfoPage> {
+  bool _isConnecting = true;
+  bool _isConnected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _connectToDevice();
+  }
+
+  // wait for device to connect
+  Future<void> _connectToDevice() async {
+    try {
+      await widget.device.connect(
+        timeout: const Duration(seconds: 6)
+      );
+
+      // connection succeeded
+      if (mounted) {
+        setState(() {
+          _isConnecting = false;
+          _isConnected = true;
+        });
+      }
+    } on Exception {
+      if (!mounted) return;
+      //??? add error msgs here
+      setState(() {
+        _isConnecting = false;
+        _isConnected = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.device.disconnect();
+    super.dispose();
+  } 
+
+
+  // Actual page that pops up with device details
+  @override
+  Widget build(BuildContext context) {
+    final name = widget.device.platformName.isNotEmpty
+        ? widget.device.platformName
+        : 'Unknown device';
+    final id = widget.device.remoteId.str;
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.blue.shade600,
+        foregroundColor: Colors.white,
+        title: const Text('Device Info'),
+      ),
+      body: Center(
+        child: _isConnecting
+            ? const Text( "Connecting in progress.... ",
+                          textAlign: TextAlign.center)
+            : !_isConnected
+                ? const Text(
+                    'Connection failed',
+                    textAlign: TextAlign.center,
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.bluetooth, size: 60, color: Colors.blue),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Connected',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 16),
+                      Text('Name: $name'),
+                      const SizedBox(height: 8),
+                      Text('ID: $id'),
+                    ],
+                  ),  
+        ),
     );
   }
 }
