@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+import 'device_info_page.dart';
 
 void main() {
   runApp(const MyApp());
@@ -27,7 +30,7 @@ class MyApp extends StatelessWidget {
 /*
 ============================
   BLE DEVICE LIST PAGE
-============================ 
+============================
 */
 
 class BleDeviceListPage extends StatefulWidget {
@@ -63,11 +66,24 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
   Future<void> _startScan() async {
     if (kIsWeb) return;
 
+    final permissions = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
+    ].request();
+
+    if (!permissions[Permission.bluetoothScan]!.isGranted) {
+      return;
+    }
+
     _latestByDevice.clear();
     setState(() {});
 
     await FlutterBluePlus.stopScan();
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
+    await FlutterBluePlus.startScan(
+      timeout: const Duration(seconds: 6),
+      androidUsesFineLocation: true,
+    );
   }
 
   Future<void> _openSettings() async {
@@ -157,7 +173,14 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                       title: Text(name),
                       subtitle: Text(r.device.remoteId.str),
                       trailing: Text('${r.rssi} dBm'),
-                      onTap: () {},
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => DeviceInfoPage(device: r.device),
+                          ),
+                        );
+                      },
                     );
                   },
                 );
@@ -170,9 +193,11 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
   }
 }
 
-/* ============================
-   SETTINGS PAGE (PERSISTENT)
-   ============================ */
+/*
+============================
+  SETTINGS PAGE
+============================
+*/
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
