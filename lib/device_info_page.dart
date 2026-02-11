@@ -276,6 +276,25 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   @override
   Widget build(BuildContext context) {
+    // If the bluetooth connection state changes, run code to change UI
+    return StreamBuilder<BluetoothConnectionState>(
+      stream: widget.device.connectionState,
+      initialData: BluetoothConnectionState.disconnected,
+      builder: (context, snapshot) {
+        final state = snapshot.data;
+
+      // display right page depending of if the device is connected
+        if (state == BluetoothConnectionState.connected) { 
+          return _buildConnectedUI();
+        } else {
+          return _buildDisconnectedUI();
+        }
+      }
+    );
+  }
+
+  // if the device is connected, share device info
+  Widget _buildConnectedUI() {
     final deviceName = widget.device.platformName.isNotEmpty
         ? widget.device.platformName
         : 'Unknown device';
@@ -373,6 +392,14 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                 ],
               ),
       ),
+    );
+  }
+
+  // sends you to screen with disconnected text
+  Widget _buildDisconnectedUI() {
+    return Scaffold(
+      body: Center(
+        child: Text("disconnected"))
     );
   }
 }

@@ -140,7 +140,8 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                 final results = snapshot.data ?? const [];
 
                 for (final r in results) {
-                  if (r.rssi > -45) { // only show devices super close
+                  // scanned devices show if they are super close or already connected
+                  if (r.rssi > -45 || r.device.isConnected) { 
                     _latestByDevice[r.device.remoteId] = r;
                   }
                 }
