@@ -140,7 +140,9 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                 final results = snapshot.data ?? const [];
 
                 for (final r in results) {
-                  _latestByDevice[r.device.remoteId] = r;
+                  if (r.rssi > -45) { // only show devices super close
+                    _latestByDevice[r.device.remoteId] = r;
+                  }
                 }
 
                 final devices = _latestByDevice.values.toList()
@@ -161,6 +163,8 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                   separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final r = devices[index];
+                    
+
                     final name =
                         r.advertisementData.advName.trim().isNotEmpty
                             ? r.advertisementData.advName.trim()
