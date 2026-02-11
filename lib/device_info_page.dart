@@ -279,9 +279,18 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     // If the bluetooth connection state changes, run code to change UI
     return StreamBuilder<BluetoothConnectionState>(
       stream: widget.device.connectionState,
-      initialData: BluetoothConnectionState.disconnected,
       builder: (context, snapshot) {
         final state = snapshot.data;
+
+        // blank screen if data not received yet
+        if (_isConnecting) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(),
+            ),
+          ); 
+        }
+
 
       // display right page depending of if the device is connected
         if (state == BluetoothConnectionState.connected) { 
@@ -399,7 +408,21 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   Widget _buildDisconnectedUI() {
     return Scaffold(
       body: Center(
-        child: Text("disconnected"))
+        child: Column( 
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("disconnected"),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton( // back button
+                onPressed: () => Navigator.of(context).pop(), 
+                child: const Text('Back'),
+              ),
+            ),
+          ],
+      ),
+      ),
     );
   }
 }
