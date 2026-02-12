@@ -24,9 +24,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   bool _isConnecting = true;
   bool _isConnected = false;
 
-  String _settingsJsonPretty = '';
+  final TextEditingController _settingsController = TextEditingController();
 
   BluetoothCharacteristic? _helloChar;
+  BluetoothCharacteristic? _helloWriteChar;
   StreamSubscription<List<int>>? _notifySub;
 
   final List<String> _messages = [];
@@ -47,9 +48,8 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     ).convert({"name": name, "id": id});
 
     if (!mounted) return;
-    setState(() {
-      _settingsJsonPretty = pretty;
-    });
+    _settingsController.text = pretty;
+    setState(() {});
   }
 
   void _addMessage(String text) {
@@ -98,7 +98,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   Future<void> _setupHelloCharacteristicReadAndNotify() async {
     try {
-      final services = await widget.device.discoverServices();
+      var services = await widget.device.discoverServices();
       _printGattToTerminal(services);
 
       BluetoothCharacteristic? found = _findHelloCharacteristic(services);
@@ -108,9 +108,9 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
           "Custom service not found, retrying discovery once (Android cache common)...",
         );
         await Future.delayed(const Duration(milliseconds: 600));
-        final services2 = await widget.device.discoverServices();
-        _printGattToTerminal(services2);
-        found = _findHelloCharacteristic(services2);
+        services = await widget.device.discoverServices();
+        _printGattToTerminal(services);
+        found = _findHelloCharacteristic(services);
       }
 
       if (found == null) {
@@ -123,9 +123,9 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       }
 
       _helloChar = found;
-
-    await _enableNotifyAndListen(_helloChar!);
-    await _readHelloOnce();
+      _helloWriteChar = _findWriteCharacteristic(services) ?? found;
+      await _enableNotifyAndListen(_helloChar!);
+      await _readHelloOnce();
 
     } catch (e) {
       _addMessage("Setup failed: $e");
@@ -139,6 +139,28 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       if (s.uuid == helloServiceUuid) {
         for (final c in s.characteristics) {
           if (c.uuid == helloValueUuid) return c;
+        }
+      }
+    }
+    return null;
+  }
+
+  BluetoothCharacteristic? _findWriteCharacteristic(
+    List<BluetoothService> services,
+  ) {
+    for (final s in services) {
+      if (s.uuid != helloServiceUuid) continue;
+
+      for (final c in s.characteristics) {
+        if (c.uuid == helloValueUuid &&
+            (c.properties.write || c.properties.writeWithoutResponse)) {
+          return c;
+        }
+      }
+
+      for (final c in s.characteristics) {
+        if (c.properties.write || c.properties.writeWithoutResponse) {
+          return c;
         }
       }
     }
@@ -217,31 +239,107 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 }
 
 
-  void _sendSettingsJson() {
-    // later
+  Future<void> _sendSettingsJson() async {
+    final candidates = <BluetoothCharacteristic?>[_helloWriteChar, _helloChar]
+        .whereType<BluetoothCharacteristic>()
+        .toSet()
+        .toList();
+
+    if (candidates.isEmpty) {
+      _addMessage("Send failed: characteristic not ready.");
+      return;
+    }
+
+    final raw = _settingsController.text.trim();
+    if (raw.isEmpty) {
+      _addMessage("Send failed: JSON is empty.");
+      return;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        _addMessage("Send failed: JSON must be an object.");
+        return;
+      }
+
+      final payloadMap = Map<String, dynamic>.from(decoded);
+      payloadMap['timestamp'] = DateTime.now().toIso8601String();
+
+      final payload = jsonEncode(payloadMap);
+      final pretty = const JsonEncoder.withIndent('  ').convert(payloadMap);
+      _settingsController.text = pretty;
+
+      final bytes = utf8.encode(payload);
+      Object? lastError;
+      var sent = false;
+
+      for (final c in candidates) {
+        try {
+          if (c.properties.write) {
+            await c.write(bytes, withoutResponse: false);
+            sent = true;
+            break;
+          }
+
+          if (c.properties.writeWithoutResponse) {
+            await c.write(bytes, withoutResponse: true);
+            sent = true;
+            break;
+          }
+
+          // Fallback for stacks that misreport characteristic properties.
+          try {
+            await c.write(bytes, withoutResponse: false);
+            sent = true;
+            break;
+          } catch (_) {
+            await c.write(bytes, withoutResponse: true);
+            sent = true;
+            break;
+          }
+        } catch (e) {
+          lastError = e;
+        }
+      }
+
+      if (!sent) {
+        _addMessage("Send failed: write rejected ($lastError).");
+        return;
+      }
+
+      debugPrint("WRITE TX: $payload");
+      _addMessage("TX: $payload");
+    } catch (e) {
+      _addMessage("Send failed: invalid JSON or write error ($e).");
+    }
   }
 
   @override
   void dispose() {
     _notifySub?.cancel();
+    _settingsController.dispose();
     widget.device.disconnect();
     super.dispose();
   }
 
-  Widget _codeBlock(String text) {
+  Widget _jsonEditor() {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(0.05),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.black.withOpacity(0.08)),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Text(
-          text.isEmpty ? '{}' : text,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+      child: TextField(
+        controller: _settingsController,
+        maxLines: 8,
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+        decoration: const InputDecoration(
+          border: InputBorder.none,
+          contentPadding: EdgeInsets.all(12),
+          hintText: '{}',
+          hintStyle: TextStyle(fontFamily: 'monospace'),
         ),
       ),
     );
@@ -331,7 +429,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
-                  _codeBlock(_settingsJsonPretty),
+                  _jsonEditor(),
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
@@ -372,7 +470,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
-                  _codeBlock(_settingsJsonPretty),
+                  _jsonEditor(),
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
