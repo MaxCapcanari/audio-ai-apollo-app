@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class DeviceInfoPage extends StatefulWidget {
@@ -21,6 +24,9 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     "12341234-5678-1234-1234-1234567890AC",
   );
 
+  late AudioRecorder _audioRecorder;
+
+  bool _isRecording = false;
   bool _isConnecting = true;
   bool _isConnected = false;
 
@@ -35,6 +41,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   @override
   void initState() {
     super.initState();
+    _audioRecorder = AudioRecorder();
     _loadSettings();
     _connectToDevice();
   }
@@ -319,6 +326,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   void dispose() {
     _notifySub?.cancel();
     _settingsController.dispose();
+    _audioRecorder.dispose();
     widget.device.disconnect();
     super.dispose();
   }
@@ -370,6 +378,12 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
               },
             ),
     );
+  }
+
+  Future<List<FileSystemEntity>> _recordingList() async {
+    final folder = await getApplicationDocumentsDirectory();
+    final List<FileSystemEntity> files = Directory(folder.path).listSync();
+    return files.where((file) => file.path.endsWith('.m4a')).toList();
   }
 
   @override
@@ -496,10 +510,69 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   ),
                   const SizedBox(height: 8),
                   Expanded(child: _messagesBox()),
-                ],
-              ),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          "Voice Recordings",
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _recordAudio,
+                        child:Text( _isRecording ? "Stop" : "Record Audio"),
+                      ),
+                    ],
+                  ),
+                  SizedBox (
+                    height: 100,
+                    child:  FutureBuilder<List<FileSystemEntity>>(
+                    future: _recordingList(),
+                    builder: (context, snapshot) {
+                      final files = snapshot.data ?? []; // if no data, use an empty array
+                      
+                      // no list returned
+                      if (files.isEmpty) {
+                        return Text("No recordings.");
+                      }
+                      
+                      // else return a listview of all items in files
+                      return ListView.builder(
+                        itemCount: files.length,
+                        itemBuilder: (context, index) {
+                        final file = files[index];
+                        return ListTile(
+                          title: Text(file.path.split('/').last),
+                          onTap: () => _addMessage("tapped: ${file.path}. File size is: ${file.statSync().size} bytes"),
+                      );
+                    }
+                  );
+                }
+              )
+            )
+          ],
+        ),
       ),
     );
+  }
+
+  // toggle recording audio
+  Future<void> _recordAudio() async {
+    if (_isRecording) {
+      final path = await _audioRecorder.stop();
+      setState(() => _isRecording = false);
+      _addMessage("Audio saved to $path");
+    } else {
+      if (await _audioRecorder.hasPermission()) {
+        final folder = await getApplicationDocumentsDirectory();
+        final String path = '${folder.path}/Recording_file_${DateTime.now()}.m4a';
+        await _audioRecorder.start(const RecordConfig(), path: path);
+        setState(() => _isRecording = true);
+        _addMessage("Recording started");
+      } else {
+        _addMessage("No Microphone permissions");
+      }
+    }
   }
 
   // sends you to screen with disconnected text

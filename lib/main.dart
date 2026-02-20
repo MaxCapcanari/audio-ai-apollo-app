@@ -3,7 +3,6 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
-
 import 'device_info_page.dart';
 
 void main() {
@@ -140,8 +139,8 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                 final results = snapshot.data ?? const [];
 
                 for (final r in results) {
-                  // scanned devices show if they are super close or already connected
-                  if (r.rssi > -45 || r.device.isConnected) { 
+                  // scanned devices show if they are close or already connected
+                  if (r.rssi > -60 || r.device.isConnected) {  
                     _latestByDevice[r.device.remoteId] = r;
                   }
                 }
