@@ -39,13 +39,14 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   StreamSubscription<List<int>>? _notifySub;
 
   final List<String> _messages = [];
-
+  List<FileSystemEntity> _recordings = [];
   @override
   void initState() {
     super.initState();
     _audioRecorder = AudioRecorder();
     _loadSettings();
     _connectToDevice();
+    _recordingList().then((files) => setState(() => _recordings = files));
   }
 
   Future<void> _loadSettings() async {
@@ -529,39 +530,30 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   ),
                   SizedBox(
                     height: 100,
-                    child: FutureBuilder<List<FileSystemEntity>>(
-                      future: _recordingList(),
-                      builder: (context, snapshot) {
-                        final files = snapshot.data ?? [];
-
-                        if (files.isEmpty) {
-                          return const Text("No recordings.");
-                        }
-
-                        return ListView.builder(
-                          itemCount: files.length,
-                          itemBuilder: (context, index) {
-                            final file = files[index];
-                            final fileName = file.path.split('/').last;
-                            return GestureDetector(
-                              onTap: () async {
-                                await _audioPlayer.stop();
-                                await _audioPlayer.play(DeviceFileSource(file.path));
-                              },
-                              child: Container(
-                                margin: const EdgeInsets.symmetric(vertical: 3),
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                decoration: BoxDecoration(
-                                  border: Border.all(color: Colors.grey.shade300),
-                                  borderRadius: BorderRadius.circular(8),
+                    child: _recordings.isEmpty
+                        ? const Text("No recordings.")
+                        : ListView.builder(
+                            itemCount: _recordings.length,
+                            itemBuilder: (context, index) {
+                              final file = _recordings[index];
+                              final fileName = file.path.split('/').last;
+                              return GestureDetector(
+                                onTap: () async {
+                                  await _audioPlayer.stop();
+                                  await _audioPlayer.play(DeviceFileSource(file.path));
+                                },
+                                child: Container(
+                                  margin: const EdgeInsets.symmetric(vertical: 3),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(color: Colors.grey.shade300),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(fileName, style: const TextStyle(fontSize: 13)),
                                 ),
-                                child: Text(fileName, style: const TextStyle(fontSize: 13)),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),
@@ -573,7 +565,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   Future<void> _recordAudio() async {
     if (_isRecording) {
       final path = await _audioRecorder.stop();
-      setState(() => _isRecording = false);
+      _recordingList().then((files) => setState(() {
+        _isRecording = false;
+        _recordings = files;
+      }));
       _addMessage("Audio saved to $path");
     } else {
       if (await _audioRecorder.hasPermission()) {
