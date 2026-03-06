@@ -26,7 +26,6 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   );
 
   late AudioRecorder _audioRecorder;
-  late AudioRecorder _audioRecorder;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   bool _isRecording = false;
@@ -528,37 +527,44 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                       ),
                     ],
                   ),
-                  SizedBox (
+                  SizedBox(
                     height: 100,
-                    child:  FutureBuilder<List<FileSystemEntity>>(
-                    future: _recordingList(),
-                    builder: (context, snapshot) {
-                      final files = snapshot.data ?? []; // if no data, use an empty array
-                      
-                      // no list returned
-                      if (files.isEmpty) {
-                        return Text("No recordings.");
-                      }
-                      
-                      // else return a listview of all items in files
-                      return ListView.builder(
-                        itemCount: files.length,
-                        itemBuilder: (context, index) {
-                        final file = files[index];
-                        return ListTile(
-                          title: Text(file.path.split('/').last),
-                          onTap: () async {
-                            await _audioPlayer.play(DeviceFileSource(file.path));
-                            _addMessage("Playing: ${file.path.split('/').last}");
+                    child: FutureBuilder<List<FileSystemEntity>>(
+                      future: _recordingList(),
+                      builder: (context, snapshot) {
+                        final files = snapshot.data ?? [];
+
+                        if (files.isEmpty) {
+                          return const Text("No recordings.");
+                        }
+
+                        return ListView.builder(
+                          itemCount: files.length,
+                          itemBuilder: (context, index) {
+                            final file = files[index];
+                            final fileName = file.path.split('/').last;
+                            return GestureDetector(
+                              onTap: () async {
+                                await _audioPlayer.stop();
+                                await _audioPlayer.play(DeviceFileSource(file.path));
+                              },
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(vertical: 3),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.grey.shade300),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(fileName, style: const TextStyle(fontSize: 13)),
+                              ),
+                            );
                           },
-                      );
-                    }
-                  );
-                }
-              )
-            )
-          ],
-        ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
       ),
     );
   }
