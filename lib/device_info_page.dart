@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class DeviceInfoPage extends StatefulWidget {
@@ -25,6 +26,8 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   );
 
   late AudioRecorder _audioRecorder;
+  late AudioRecorder _audioRecorder;
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   bool _isRecording = false;
   bool _isConnecting = true;
@@ -327,6 +330,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     _notifySub?.cancel();
     _settingsController.dispose();
     _audioRecorder.dispose();
+    _audioPlayer.dispose();
     widget.device.disconnect();
     super.dispose();
   }
@@ -543,7 +547,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                         final file = files[index];
                         return ListTile(
                           title: Text(file.path.split('/').last),
-                          onTap: () => _addMessage("tapped: ${file.path}. File size is: ${file.statSync().size} bytes"),
+                          onTap: () async {
+                            await _audioPlayer.play(DeviceFileSource(file.path));
+                            _addMessage("Playing: ${file.path.split('/').last}");
+                          },
                       );
                     }
                   );
