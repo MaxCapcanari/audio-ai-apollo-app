@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class DeviceInfoPage extends StatefulWidget {
@@ -21,22 +26,45 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     "12341234-5678-1234-1234-1234567890AC",
   );
 
+  late AudioRecorder _audioRecorder;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
+  bool _isRecording = false;
   bool _isConnecting = true;
   bool _isConnected = false;
+  Timer? _keepAliveTimer;
 
   final TextEditingController _settingsController = TextEditingController();
 
   BluetoothCharacteristic? _helloChar;
   BluetoothCharacteristic? _helloWriteChar;
   StreamSubscription<List<int>>? _notifySub;
+  StreamSubscription<BluetoothConnectionState>? _connectionSub;
 
   final List<String> _messages = [];
-
+  List<FileSystemEntity> _recordings = [];
   @override
   void initState() {
     super.initState();
+    _audioRecorder = AudioRecorder();
     _loadSettings();
     _connectToDevice();
+
+    _connectionSub = widget.device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        if (mounted && !_isConnecting) {
+          // auto reconnect if connection is still there
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted && !_isConnecting) {
+              _connectToDevice();
+            }
+          });
+        }
+      }
+    });
+
+    _connectToDevice();
+    _recordingList().then((files) => setState(() => _recordings = files));
   }
 
   Future<void> _loadSettings() async {
@@ -74,10 +102,12 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
       await widget.device.connect(timeout: const Duration(seconds: 6));
       await Future.delayed(const Duration(milliseconds: 600));
-
+      
       try {
         await widget.device.requestMtu(247);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint("MTU req failed: $e");
+      }
 
       if (!mounted) return;
       setState(() {
@@ -86,6 +116,15 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       });
 
       await _setupHelloCharacteristicReadAndNotify();
+      _keepAliveTimer?.cancel();
+
+      // reads from device every 15 seconds to prevent disconnect
+      _keepAliveTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+        if (_isConnected && _helloChar != null) {
+          await _readHelloOnce();
+        }
+      });
+
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -277,7 +316,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       for (final c in candidates) {
         try {
           if (c.properties.write) {
-            await c.write(bytes, withoutResponse: false);
+            await c.write(bytes, withoutResponse: false, allowLongWrite: true);
             sent = true;
             break;
           }
@@ -317,9 +356,12 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   @override
   void dispose() {
+    _keepAliveTimer?.cancel();
     _notifySub?.cancel();
     _settingsController.dispose();
-    widget.device.disconnect();
+    _audioRecorder.dispose();
+    _audioPlayer.dispose();
+    _connectionSub?.cancel();
     super.dispose();
   }
 
@@ -372,15 +414,18 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     );
   }
 
+  Future<List<FileSystemEntity>> _recordingList() async {
+    final folder = await getApplicationDocumentsDirectory();
+    final List<FileSystemEntity> files = Directory(folder.path).listSync();
+    return files.where((file) => file.path.endsWith('.opus')).toList(); // Updated here!
+  }
+
   @override
   Widget build(BuildContext context) {
-    // If the bluetooth connection state changes, run code to change UI
     return StreamBuilder<BluetoothConnectionState>(
       stream: widget.device.connectionState,
       builder: (context, snapshot) {
-        final state = snapshot.data;
-
-        // blank screen if data not received yet
+        
         if (_isConnecting) {
           return const Scaffold(
             body: Center(
@@ -388,10 +433,14 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
             ),
           ); 
         }
+        
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return _isConnected ? _buildConnectedUI() : _buildDisconnectedUI();
+        }
 
+        final state = snapshot.data;
 
-      // display right page depending of if the device is connected
-        if (state == BluetoothConnectionState.connected) { 
+        if (state == BluetoothConnectionState.connected) {
           return _buildConnectedUI();
         } else {
           return _buildDisconnectedUI();
@@ -496,10 +545,102 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   ),
                   const SizedBox(height: 8),
                   Expanded(child: _messagesBox()),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          "Voice Recordings",
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _recordAudio,
+                        child:Text( _isRecording ? "Stop" : "Record Audio"),
+                      ),
+                    ],
+                  ),
+                  SizedBox(
+                    height: 100,
+                    child: _recordings.isEmpty
+                        ? const Text("No recordings.")
+                        : ListView.builder(
+                          itemCount: _recordings.length,
+                          itemBuilder: (context, index) {
+                            final file = _recordings[index];
+                            final fileName = file.path.split('/').last;
+
+                            return Card(
+                              margin: const EdgeInsets.symmetric(vertical: 4),
+                              child: ListTile(
+                                dense: true,
+                                title: Text(fileName, style: const TextStyle(fontSize: 13)),
+                                subtitle: Text("${(file.statSync().size / 1024).toStringAsFixed(1)} KB"),
+                                leading: const Icon(Icons.audiotrack, size: 20),
+                                trailing: IconButton(
+                                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                                  onPressed: () => _deleteRecording(file),
+                                ),
+                                onTap: () async {
+                                  await _audioPlayer.stop();
+                                  _addMessage("Playing: $fileName");
+                                  await _audioPlayer.play(DeviceFileSource(file.path));
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ],
               ),
       ),
     );
+  }
+
+// delete audio
+  Future<void> _deleteRecording(FileSystemEntity file) async {
+    try {
+      if (await file.exists()) {
+        await file.delete();
+        _addMessage("Deleted: ${file.path.split('/').last}");
+        
+        // Refresh the list and UI
+        final updatedList = await _recordingList();
+        setState(() {
+          _recordings = updatedList;
+        });
+      }
+    } catch (e) {
+      _addMessage("Delete failed: $e");
+    }
+  }
+
+  // toggle recording audio
+  Future<void> _recordAudio() async {
+    if (_isRecording) {
+      final path = await _audioRecorder.stop();
+      _recordingList().then((files) => setState(() {
+        _isRecording = false;
+        _recordings = files;
+      }));
+      _addMessage("Audio saved to $path");
+    } else {
+      await Permission.microphone.request();
+      if (await _audioRecorder.hasPermission()) {
+        final folder = await getApplicationDocumentsDirectory();
+        // save as an opus file
+        final String path = '${folder.path}/recording_${DateTime.now().millisecondsSinceEpoch ~/ 100}.opus';
+        
+        // encode to oppus
+        await _audioRecorder.start(
+          const RecordConfig(encoder: AudioEncoder.opus), 
+          path: path
+        );
+        setState(() => _isRecording = true);
+        _addMessage("Recording started");
+      } else {
+        _addMessage("No Microphone permissions");
+      }
+    }
   }
 
   // sends you to screen with disconnected text
