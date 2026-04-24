@@ -333,7 +333,8 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       final raw = _streamPreAllocBuffer ?? Uint8List(0);
       final oggBytes = _wrapInOggOpus(raw);
       final folder = await getApplicationDocumentsDirectory();
-      final path = '${folder.path}/ble_stream_${DateTime.now().millisecondsSinceEpoch ~/ 100}.opus';
+      //final path = '${folder.path}/ble_stream_${DateTime.now().millisecondsSinceEpoch ~/ 100}.opus';
+      final path = '${folder.path}/BLE_STREAM ${_getFormattedDate()}.opus';
       await File(path).writeAsBytes(oggBytes);
 
       final files = await _recordingList();
@@ -820,8 +821,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       await Permission.microphone.request();
       if (await _audioRecorder.hasPermission()) {
         final folder = await getApplicationDocumentsDirectory();
-        final String path =
-            '${folder.path}/recording_${DateTime.now().millisecondsSinceEpoch ~/ 100}.m4a';
+        final path = '${folder.path}/Rec ${_getFormattedDate()}.opus';
         await _audioRecorder.start(
           const RecordConfig(encoder: AudioEncoder.aacLc),
           path: path,
@@ -832,6 +832,18 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
         _addMessage("No Microphone permissions");
       }
     }
+  }
+
+    // Return a formatted date by year-month-day hour.minute.seconds
+    String _getFormattedDate() {
+    final now = DateTime.now();
+    final y = now.year;
+    final m = now.month.toString().padLeft(2, '0');
+    final d = now.day.toString().padLeft(2, '0');
+    final h = now.hour.toString().padLeft(2, '0');
+    final min = now.minute.toString().padLeft(2, '0');
+    final s = now.second.toString().padLeft(2, '0');
+    return '$y-$m-$d $h.$min.$s';
   }
 
   Future<void> _startAudioDownload() async {
