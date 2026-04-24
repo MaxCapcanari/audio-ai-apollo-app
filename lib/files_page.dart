@@ -25,6 +25,8 @@ class _FilesPageState extends State<FilesPage> {
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   bool _isRecording = false;
+  // Prevents the slider from jumping while you are dragging it
+  bool _isDragging = false; 
 
   @override
   void initState() {
@@ -33,17 +35,35 @@ class _FilesPageState extends State<FilesPage> {
     _loadRecordings();
 
     _audioPlayer.onPositionChanged.listen((p) {
-      if (mounted) setState(() => _position = p);
+      if (mounted && !_isDragging) {
+        setState(() => _position = p);
+      }
     });
+    
     _audioPlayer.onDurationChanged.listen((d) {
       if (mounted) setState(() => _duration = d);
     });
+    
     _audioPlayer.onPlayerComplete.listen((_) {
-      if (mounted) setState(() {
-        _playingPath = null;
-        _position = Duration.zero;
-      });
+      if (mounted) {
+        setState(() {
+          _playingPath = null;
+          _position = Duration.zero;
+        });
+      }
     });
+  }
+
+  // Return a formatted date by year-month-day hour.minute.seconds
+  String _getFormattedDate() {
+    final now = DateTime.now();
+    final y = now.year;
+    final m = now.month.toString().padLeft(2, '0');
+    final d = now.day.toString().padLeft(2, '0');
+    final h = now.hour.toString().padLeft(2, '0');
+    final min = now.minute.toString().padLeft(2, '0');
+    final s = now.second.toString().padLeft(2, '0');
+    return '$y-$m-$d $h.$min.$s';
   }
 
   Future<void> _loadRecordings() async {
@@ -52,7 +72,7 @@ class _FilesPageState extends State<FilesPage> {
         .listSync()
         .where((f) => f.path.endsWith('.opus'))
         .toList()
-      ..sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+      ..sort((a, b) => b.path.compareTo(a.path));
     setState(() => _recordings = files);
   }
 
@@ -65,7 +85,8 @@ class _FilesPageState extends State<FilesPage> {
       await Permission.microphone.request();
       if (await _audioRecorder.hasPermission()) {
         final folder = await getApplicationDocumentsDirectory();
-        final path = '${folder.path}/recording_${DateTime.now().millisecondsSinceEpoch ~/ 100}.opus';
+        final path = '${folder.path}/Rec ${_getFormattedDate()}.opus';
+        
         await _audioRecorder.start(
           const RecordConfig(encoder: AudioEncoder.opus),
           path: path,
@@ -148,7 +169,8 @@ class _FilesPageState extends State<FilesPage> {
               itemBuilder: (context, index) {
                 final file = _recordings[index];
                 final path = file.path;
-                final name = path.split('/').last.replaceAll('.opus', '');
+                final rawName = path.split('/').last.replaceAll('.opus', '');
+                final displayName = rawName.replaceAll('.', ':');
                 final isPlaying = _playingPath == path;
                 final sliderMax = isPlaying && _duration.inMilliseconds > 0
                     ? _duration.inMilliseconds.toDouble()
@@ -174,7 +196,7 @@ class _FilesPageState extends State<FilesPage> {
                             Expanded(
                               child: Center(
                                 child: Text(
-                                  name.toUpperCase(),
+                                  displayName,
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold,
@@ -219,7 +241,16 @@ class _FilesPageState extends State<FilesPage> {
                             value: sliderVal,
                             min: 0,
                             max: sliderMax,
-                            onChanged: (v) => _seek(path, v),
+                            onChangeStart: (v) {
+                              setState(() => _isDragging = true);
+                            },
+                            onChanged: (v) {
+                              setState(() => _position = Duration(milliseconds: v.toInt()));
+                            },
+                            onChangeEnd: (v) async {
+                              await _seek(path, v);
+                              setState(() => _isDragging = false);
+                            },
                           ),
                         ),
                       ],

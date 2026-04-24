@@ -10,8 +10,6 @@ void main() {
   runApp(const MyApp());
 }
 
-// Replace your MyApp and add HomePage class
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 

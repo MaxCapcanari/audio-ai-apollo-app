@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import 'package:audioplayers/audioplayers.dart';
 
 class DeviceInfoPage extends StatefulWidget {
   final BluetoothDevice device;
+
   const DeviceInfoPage({super.key, required this.device});
 
   @override
@@ -17,6 +19,12 @@ class DeviceInfoPage extends StatefulWidget {
 }
 
 class _DeviceInfoPageState extends State<DeviceInfoPage> {
+  // Colors for UI
+  static const darkGreen = Color(0xFF3B4A2F);
+  static const cream = Color(0xFFF5F0DC);
+  static const buttonGreen = Color(0xFF4A5E35);
+  static const textBoxColor = Color(0xFFDDDDC3);
+
   // JSON service
   static final Guid helloServiceUuid = Guid("12341234-5678-1234-1234-1234567890AB");
   static final Guid helloValueUuid   = Guid("12341234-5678-1234-1234-1234567890AC");
@@ -25,9 +33,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   static final Guid opusServiceUuid = Guid("12341234-5678-1234-1234-1234567890BB");
   static final Guid opusCharUuid    = Guid("12341234-5678-1234-1234-1234567890BC");
 
-  static final Guid helloServiceUuid = Guid("12341234-5678-1234-1234-1234567890AB");
-  static final Guid helloValueUuid   = Guid("12341234-5678-1234-1234-1234567890AC");
+  late AudioRecorder _audioRecorder;
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
+  bool _isRecording = false;
   bool _isConnecting = true;
   bool _isConnected = false;
   Timer? _keepAliveTimer;
@@ -54,9 +63,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<List<int>>? _opusNotifySub;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
-  Timer? _keepAliveTimer;
 
-  final TextEditingController _jsonController = TextEditingController();
   final List<String> _messages = [];
   List<FileSystemEntity> _recordings = [];
 
@@ -69,22 +76,30 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     _connectionSub = widget.device.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected) {
         if (mounted && !_isConnecting) {
+          // auto reconnect if connection is still there
           Future.delayed(const Duration(seconds: 2), () {
-            if (mounted && !_isConnecting) _connectToDevice();
+            if (mounted && !_isConnecting) {
+              _connectToDevice();
+            }
           });
         }
       }
     });
+
+    _connectToDevice();
+    _recordingList().then((files) => setState(() => _recordings = files));
   }
 
   void _addMessage(String text) {
     final msg = text.trim();
-    if (msg.isEmpty || !mounted) return;
-    setState(() => _messages.insert(0, msg));
+    if (msg.isEmpty) return;
+    if (!mounted) return;
+    setState(() {
+      _messages.insert(0, msg);
+    });
   }
 
   Future<void> _connectToDevice() async {
-    setState(() => _isConnecting = true);
     try {
       debugPrint("Connecting to: ${widget.device.remoteId.str} name=${widget.device.platformName}");
 
@@ -92,6 +107,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
         await widget.device.disconnect();
       } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 300));
+
       await widget.device.connect(timeout: const Duration(seconds: 6));
       await Future.delayed(const Duration(milliseconds: 600));
 
@@ -102,9 +118,13 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       }
 
       if (!mounted) return;
-      setState(() { _isConnecting = false; _isConnected = true; });
+      setState(() {
+        _isConnecting = false;
+        _isConnected = true;
+      });
 
-      await _setupCharacteristics();
+      await _setupHelloCharacteristicReadAndNotify();
+      _keepAliveTimer?.cancel();
 
       // silent read every 15 seconds to prevent disconnect — skipped during Opus stream
       _keepAliveTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
@@ -116,22 +136,37 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _isConnecting = false; _isConnected = false; });
+      setState(() {
+        _isConnecting = false;
+        _isConnected = false;
+      });
       _addMessage("Connection failed: $e");
     }
   }
 
-  Future<void> _setupCharacteristics() async {
+  Future<void> _setupHelloCharacteristicReadAndNotify() async {
     try {
       var services = await widget.device.discoverServices();
-      BluetoothCharacteristic? found = _findChar(services, helloServiceUuid, helloValueUuid);
+      _printGattToTerminal(services);
+
+      BluetoothCharacteristic? found = _findHelloCharacteristic(services);
+
       if (found == null) {
         debugPrint("Custom service not found, retrying discovery once (Android cache common)...");
         await Future.delayed(const Duration(milliseconds: 600));
         services = await widget.device.discoverServices();
-        found = _findChar(services, helloServiceUuid, helloValueUuid);
+        _printGattToTerminal(services);
+        found = _findHelloCharacteristic(services);
       }
-      if (found == null) { _addMessage("Characteristic not found."); return; }
+
+      if (found == null) {
+        _addMessage(
+          "Error: hello characteristic not found.\n"
+          "Expected Service: ${helloServiceUuid.str}\n"
+          "Expected Char:    ${helloValueUuid.str}",
+        );
+        return;
+      }
 
       _helloChar = found;
       _discoveredServices = services;
@@ -490,9 +525,37 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     return null;
   }
 
-  Future<void> _readOnce() async {
+  void _printGattToTerminal(List<BluetoothService> services) {
+    debugPrint("===== GATT DISCOVERY START =====");
+    for (final s in services) {
+      debugPrint("Service: ${s.uuid.str}");
+      for (final c in s.characteristics) {
+        debugPrint(
+          "  Char: ${c.uuid.str} (props: "
+          "r=${c.properties.read} "
+          "w=${c.properties.write} "
+          "wnr=${c.properties.writeWithoutResponse} "
+          "n=${c.properties.notify} "
+          "i=${c.properties.indicate})",
+        );
+        for (final d in c.descriptors) {
+          debugPrint("    Desc: ${d.uuid.str}");
+        }
+      }
+    }
+    debugPrint("===== GATT DISCOVERY END =====");
+  }
+
+  Future<void> _readHelloOnce() async {
     final c = _helloChar;
-    if (c == null || !c.properties.read) return;
+    if (c == null) return;
+
+    if (!c.properties.read) {
+      debugPrint("Hello characteristic is not readable.");
+      _addMessage("Read not supported on characteristic.");
+      return;
+    }
+
     final bytes = await c.read();
     final text  = utf8.decode(bytes, allowMalformed: true).trim();
     debugPrint("READ RX: $text");
@@ -540,7 +603,6 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     _connectionSub?.cancel();
-    _jsonController.dispose();
     super.dispose();
   }
 
@@ -605,8 +667,9 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     final deviceId = widget.device.remoteId.str;
 
     return Scaffold(
+      backgroundColor: cream,
       appBar: AppBar(
-        backgroundColor: Colors.blue.shade600,
+        backgroundColor: darkGreen,
         foregroundColor: Colors.white,
         title: const Text('Device Info'),
       ),
@@ -621,7 +684,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.bluetooth, size: 60, color: Colors.blue),
+                      const Icon(Icons.bluetooth, size: 60, color: darkGreen),
                       const SizedBox(height: 8),
                       const Text('Connected', textAlign: TextAlign.center),
                       const SizedBox(height: 4),
@@ -646,7 +709,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        const Icon(Icons.sensors, size: 16, color: Colors.blue),
+                        const Icon(Icons.sensors, size: 16, color: darkGreen),
                         const SizedBox(width: 6),
                         const Expanded(
                           child: Text("Downloading audio...", style: TextStyle(fontWeight: FontWeight.w600)),
@@ -710,7 +773,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                                   leading: Icon(
                                     isBle ? Icons.sensors : Icons.audiotrack,
                                     size: 20,
-                                    color: isBle ? Colors.blue : null,
+                                    color: isBle ? darkGreen : null,
                                   ),
                                   trailing: IconButton(
                                     icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -728,9 +791,6 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   ),
                 ],
               ),
-            ),
-          ),
-        ],
       ),
     );
   }
