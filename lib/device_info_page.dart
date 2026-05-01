@@ -66,11 +66,39 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   final List<String> _messages = [];
   List<FileSystemEntity> _recordings = [];
+  String? _playingPath;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  // Prevents the slider from jumping while you are dragging it
+  bool _isDragging = false; 
 
   @override
   void initState() {
     super.initState();
     _audioRecorder = AudioRecorder();
+    
+    // Checks duration change for audio playback
+    _audioPlayer.onDurationChanged.listen((newDuration) {
+      if (mounted) setState(() => _duration = newDuration);
+    });
+
+    // Changes position of slider  
+    _audioPlayer.onPositionChanged.listen((newPosition) {
+      if (mounted && !_isDragging) {
+        setState(() => _position = newPosition);
+      }
+    });
+
+    // Set to default after
+    _audioPlayer.onPlayerComplete.listen((event) {
+      if (mounted) {
+        setState(() {
+          _playingPath = null;
+          _position = Duration.zero;
+        });
+      }
+    });
+
     _connectToDevice();
 
     _connectionSub = widget.device.connectionState.listen((state) {
@@ -661,6 +689,12 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     );
   }
 
+    Future<void> _seek(String path, double value) async {
+    if (_playingPath == path) {
+      await _audioPlayer.seek(Duration(milliseconds: value.toInt()));
+    }
+  }
+
   Widget _buildConnectedUI() {
     final deviceName = widget.device.platformName.isNotEmpty
         ? widget.device.platformName
@@ -756,39 +790,101 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                     child: _recordings.isEmpty
                         ? const Text("No recordings.")
                         : ListView.builder(
-                            itemCount: _recordings.length,
-                            itemBuilder: (context, index) {
-                              final file     = _recordings[index];
-                              final fileName = file.path.split('/').last;
-                              final isBle    = fileName.endsWith('.opus');
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      itemCount: _recordings.length,
+                      itemBuilder: (context, index) {
+                        final file = _recordings[index];
+                        final path = file.path;
+                        final rawName = path.split('/').last.replaceAll('.opus', '');
+                        final displayName = rawName.replaceAll('.', ':');
+                        final isPlaying = _playingPath == path;
+                        final sliderMax = isPlaying && _duration.inMilliseconds > 0
+                            ? _duration.inMilliseconds.toDouble()
+                            : 1.0;
+                        final sliderVal = isPlaying
+                            ? _position.inMilliseconds.toDouble().clamp(0.0, sliderMax)
+                            : 0.0;
 
-                              return Card(
-                                margin: const EdgeInsets.symmetric(vertical: 4),
-                                child: ListTile(
-                                  dense: true,
-                                  title: Text(fileName, style: const TextStyle(fontSize: 13)),
-                                  subtitle: Text(
-                                    "${isBle ? 'BLE • ' : ''}"
-                                    "${(file.statSync().size / 1024).toStringAsFixed(1)} KB",
-                                  ),
-                                  leading: Icon(
-                                    isBle ? Icons.sensors : Icons.audiotrack,
-                                    size: 20,
-                                    color: isBle ? darkGreen : null,
-                                  ),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                    onPressed: () => _deleteRecording(file),
-                                  ),
-                                  onTap: () async {
-                                    await _audioPlayer.stop();
-                                    _addMessage("Playing: $fileName");
-                                    await _audioPlayer.play(DeviceFileSource(file.path));
-                                  },
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: buttonGreen,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            padding: const EdgeInsets.fromLTRB(5, 10, 8, 10),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                // Name + trash
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Center(
+                                        child: Text(
+                                          displayName,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                            letterSpacing: 1.2,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      onTap: () => _deleteRecording(file),
+                                      child: const Padding(
+                                        padding: EdgeInsets.only(top: 2),
+                                        child: Icon(Icons.delete_outline, color: Colors.white70, size: 22),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                              );
-                            },
+
+                                // Play/pause button
+                                GestureDetector(
+                                  onTap: () => _togglePlay(path),
+                                  child: Icon(
+                                    isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                                    color: Colors.white,
+                                    size: 36,
+                                  ),
+                                ),
+
+                                // Scrub slider
+                                SliderTheme(
+                                  data: SliderTheme.of(context).copyWith(
+                                    trackHeight: 2,
+                                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                                    activeTrackColor: Colors.white,
+                                    inactiveTrackColor: Colors.white30,
+                                    thumbColor: Colors.white,
+                                    overlayColor: Colors.white24,
+                                  ),
+                                  child: Slider(
+                                    value: sliderVal,
+                                    min: 0,
+                                    max: sliderMax,
+                                    onChangeStart: (v) {
+                                      setState(() => _isDragging = true);
+                                    },
+                                    onChanged: (v) {
+                                      setState(() => _position = Duration(milliseconds: v.toInt()));
+                                    },
+                                    onChangeEnd: (v) async {
+                                      await _seek(path, v);
+                                      setState(() => _isDragging = false);
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
+                        );
+                      },
+                    ),
                   ),
                 ],
               ),
@@ -798,6 +894,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   Future<void> _deleteRecording(FileSystemEntity file) async {
     try {
+      if (_playingPath == file.path) {
+        await _audioPlayer.stop();
+        setState(() { _playingPath = null; _position = Duration.zero; });
+      }
       if (await file.exists()) {
         await file.delete();
         _addMessage("Deleted: ${file.path.split('/').last}");
@@ -806,6 +906,18 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       }
     } catch (e) {
       _addMessage("Delete failed: $e");
+    }
+  }
+
+  
+  Future<void> _togglePlay(String path) async {
+    if (_playingPath == path) {
+      await _audioPlayer.pause();
+      setState(() => _playingPath = null);
+    } else {
+      await _audioPlayer.stop();
+      setState(() { _playingPath = path; _position = Duration.zero; });
+      await _audioPlayer.play(DeviceFileSource(path));
     }
   }
 
@@ -859,22 +971,54 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
   Widget _buildDisconnectedUI() {
     return Scaffold(
+      backgroundColor: cream,
+      appBar: AppBar(
+        backgroundColor: darkGreen,
+        foregroundColor: Colors.white,
+        title: const Text('Device Disconnected'),
+      ),
       body: Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 40),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text("disconnected"),
+            const Icon(Icons.bluetooth_disabled, size: 80, color: darkGreen),
+            const SizedBox(height: 16),
+            const Text(
+              "Device Disconnected",
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: darkGreen,
+              ),
+            ),
             const SizedBox(height: 8),
+            const Text(
+              "The connection to Apollo was lost.",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.black54),
+            ),
+            const SizedBox(height: 24),
             SizedBox(
-              width: double.infinity,
+              width: double.infinity, 
               child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: buttonGreen,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
                 onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Back'),
+                child: const Text('Back to Scan'),
               ),
             ),
           ],
         ),
       ),
+    )
     );
   }
 }
