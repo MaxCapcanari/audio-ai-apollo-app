@@ -312,7 +312,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       // runs down and fires — triggering ACK/NACK without waiting for the EVB's
       // 5 s ACK timeout.
       _windowAckTimer?.cancel();
-      _windowAckTimer = Timer(const Duration(seconds: 2), _onWindowAckTimeout);
+      _windowAckTimer = Timer(const Duration(milliseconds: 1500), _onWindowAckTimeout);
     }
 
     debugPrint("OPUS PKT $packetIndex/$totalPackets flags=0x${flags.toRadixString(16)}");
