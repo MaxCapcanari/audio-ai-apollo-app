@@ -266,9 +266,7 @@ class _BleDeviceListPageState extends State<BleDeviceListPage> {
                 final results = snapshot.data ?? const [];
 
                 for (final r in results) {
-                  if (r.rssi > -60 || r.device.isConnected) {
-                    _latestByDevice[r.device.remoteId] = r;
-                  }
+                  _latestByDevice[r.device.remoteId] = r;
                 }
 
                 final devices = _latestByDevice.values.toList()

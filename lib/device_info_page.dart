@@ -51,15 +51,17 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   Uint8List? _streamPreAllocBuffer;
 
   // ACK/window flow control — mirrors TCP-style stop-and-wait
-  static const int _windowSize = 20;    // packets per window; tune up if loss improves
-  static const int _maxRetries = 3;     // max NACK retries per window before skipping
-  static const int _flagWindowEnd = 0x04; // new flag bit: EVB finished sending current window
+  static const int _windowSize = 20;    // packets per window (used for manual replay cmd)
+  static const int _maxRetries = 3;     // NACK retries per window before giving up and ACKing
+  static const int _flagWindowEnd = 0x04; // EVB finished sending current window, must ACK/NACK
   int _windowStart = 0;                 // first packet index of the current window
-  int _windowRetries = 0;
+  int _windowRetries = 0;               // NACK retry count for the current window
+  int _windowEnd = 0;                   // true end of the current window, locked in on first WINDOW_END
+  int _lastHandledWindowEnd = -1;       // guards against duplicate WINDOW_END for the same boundary
   final Set<int> _receivedIndices = {}; // all packet indices received so far
+  Timer? _windowAckTimer;               // fires if WINDOW_END is dropped — app-side ACK trigger
 
   BluetoothCharacteristic? _helloChar;
-  List<BluetoothService> _discoveredServices = [];
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<List<int>>? _opusNotifySub;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
@@ -98,8 +100,6 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
         });
       }
     });
-
-    _connectToDevice();
 
     _connectionSub = widget.device.connectionState.listen((state) {
       if (state == BluetoothConnectionState.disconnected) {
@@ -197,9 +197,10 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
       }
 
       _helloChar = found;
-      _discoveredServices = services;
       await _enableNotifyAndListen(_helloChar!);
       await _readHelloOnce();
+      // Subscribe to Opus immediately — device may already have a pending recording
+      await _setupOpusCharacteristic(services);
     } catch (e) {
       _addMessage("Setup failed: $e");
     }
@@ -259,15 +260,36 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     final totalLen     = value[6] | (value[7] << 8) | (value[8] << 16) | (value[9] << 24);
     final payload      = value.sublist(10);
 
-    if (flags & 0x01 != 0) { // START — reset all flow-control state
-      _streamPreAllocBuffer = totalLen > 0 ? Uint8List(totalLen) : null;
-      _streamPacketsTotal = totalPackets;
-      _streamPacketsReceived = 0;
-      _windowStart = 0;
-      _windowRetries = 0;
-      _receivedIndices.clear();
-      if (mounted) setState(() => _isReceivingStream = true);
-      _addMessage("Stream start: $totalPackets pkts, $totalLen bytes");
+    if (flags & 0x01 != 0) { // START
+      final isSameStream = _streamPreAllocBuffer != null &&
+          _streamPreAllocBuffer!.length == totalLen &&
+          _streamPacketsTotal == totalPackets;
+
+      if (!isSameStream) {
+        // Genuinely new recording — reset everything including flow control.
+        _streamPreAllocBuffer = totalLen > 0 ? Uint8List(totalLen) : null;
+        _receivedIndices.clear();
+        _streamPacketsReceived = 0;
+        _streamPacketsTotal = totalPackets;
+        _windowStart = 0;
+        _windowRetries = 0;
+        _windowEnd = 0;
+        _lastHandledWindowEnd = -1;
+        if (mounted) setState(() => _isReceivingStream = true);
+        _addMessage("Stream start: $totalPackets pkts, $totalLen bytes");
+      } else if (_windowStart == 0) {
+        // Same stream, still working window 0 — preserve buffer & indices,
+        // keep _windowRetries and _windowEnd intact (don't reset retry count).
+        _streamPacketsReceived = _receivedIndices.length;
+        debugPrint("Stream resend (window 0) — keeping ${_receivedIndices.length} received packets");
+        _addMessage("Stream resend: keeping ${_receivedIndices.length} packets");
+      } else {
+        // Same stream, already past window 0 — this is a delayed pkt-0 resend
+        // that crossed our ACK in flight.  Just collect pkt 0's data, do NOT
+        // touch _windowStart, _windowEnd, _windowRetries, or _lastHandledWindowEnd.
+        _streamPacketsReceived = _receivedIndices.length;
+        debugPrint("Delayed pkt 0 resend (window $_windowStart active) — ignoring flow reset");
+      }
     }
 
     // Write payload at its correct byte offset — deduplicates re-delivered packets
@@ -281,9 +303,16 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     }
 
     // Track which indices we have
-    if (!_receivedIndices.contains(packetIndex)) {
+    final isNewPacket = !_receivedIndices.contains(packetIndex);
+    if (isNewPacket) {
       _receivedIndices.add(packetIndex);
       _streamPacketsReceived++;
+      // Only reset the idle timer on genuinely new packets.
+      // If the EVB keeps resending duplicates we've already received, the timer
+      // runs down and fires — triggering ACK/NACK without waiting for the EVB's
+      // 5 s ACK timeout.
+      _windowAckTimer?.cancel();
+      _windowAckTimer = Timer(const Duration(seconds: 2), _onWindowAckTimeout);
     }
 
     debugPrint("OPUS PKT $packetIndex/$totalPackets flags=0x${flags.toRadixString(16)}");
@@ -293,7 +322,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
 
     // WINDOW_END: EVB finished sending this window — send ACK or NACK
     if (flags & _flagWindowEnd != 0) {
-      _handleWindowEnd();
+      _handleWindowEnd(packetIndex);
       return;
     }
 
@@ -306,33 +335,53 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     }
   }
 
-  void _handleWindowEnd() {
-    final windowEnd = (_windowStart + _windowSize).clamp(0, _streamPacketsTotal);
+  void _onWindowAckTimeout() {
+    if (!_isReceivingStream) return;
+    // WINDOW_END was dropped — infer it from the expected window boundary.
+    final expectedLast = (_windowStart + _windowSize).clamp(1, _streamPacketsTotal) - 1;
+    debugPrint("App-side window timeout — inferring WINDOW_END at pkt $expectedLast");
+    _handleWindowEnd(expectedLast);
+  }
 
-    // Find any missing indices in this window
+  void _handleWindowEnd(int lastPacketIndex) {
+    _windowAckTimer?.cancel();
+    // On the first WINDOW_END for a window (normal send), lock in the true window
+    // boundary. On retransmit WINDOW_END, lastPacketIndex is the last MISSING packet
+    // (not the last of the window), so we must reuse the locked-in _windowEnd.
+    if (_windowRetries == 0) {
+      _windowEnd = (lastPacketIndex + 1).clamp(0, _streamPacketsTotal);
+    }
+    final end = _windowEnd;
+
+    // Guard: ignore duplicate WINDOW_END for the same boundary.
+    // Reset to -1 after sending NACK so the retransmit's WINDOW_END is not blocked.
+    if (end == _lastHandledWindowEnd) return;
+    _lastHandledWindowEnd = end;
+
+    // Find gaps across the full window (always 0.._windowEnd, not just 0..lastPacket)
     final missing = <int>[];
-    for (int i = _windowStart; i < windowEnd; i++) {
+    for (int i = _windowStart; i < end; i++) {
       if (!_receivedIndices.contains(i)) missing.add(i);
     }
 
     if (missing.isNotEmpty && _windowRetries < _maxRetries) {
-      // NACK — ask EVB to resend missing packets
+      // NACK — selective retransmit. Reset guard so retransmit WINDOW_END gets through.
       _windowRetries++;
-      debugPrint("NACK window $_windowStart–$windowEnd missing=${missing.length} retry=$_windowRetries");
+      _lastHandledWindowEnd = -1;
+      debugPrint("NACK window $_windowStart–$end missing=${missing.length} retry=$_windowRetries");
       _sendJson({"cmd": "nack", "window_start": _windowStart, "missing": missing});
     } else {
       // ACK — advance to next window
       if (missing.isNotEmpty) {
-        _addMessage("Window $_windowStart: gave up on ${missing.length} missing after $_maxRetries retries");
+        debugPrint("Window $_windowStart–$end: gave up on ${missing.length} gap(s) after $_windowRetries retries");
       }
-      _windowStart = windowEnd;
+      _windowStart = end;
       _windowRetries = 0;
 
       if (_windowStart >= _streamPacketsTotal) {
-        // All windows done — ACK the EVB first so it stops retrying, then save
         debugPrint("ACK final (stream complete)");
         _sendJson({"cmd": "ack", "next": _windowStart});
-        _isReceivingStream = false; // guard against re-entry before async save completes
+        _isReceivingStream = false;
         _saveStreamToFile();
       } else {
         debugPrint("ACK next window $_windowStart");
@@ -341,18 +390,30 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     }
   }
 
-  void _sendJson(Map<String, dynamic> payload) {
+  Future<void> _sendJson(Map<String, dynamic> payload) async {
     final c = _helloChar;
-    if (c == null) return;
-    final bytes = utf8.encode(jsonEncode(payload));
-    if (c.properties.write) {
-      c.write(bytes, withoutResponse: false).catchError((e) {
-        debugPrint("JSON write failed: $e");
-      });
-    } else if (c.properties.writeWithoutResponse) {
-      c.write(bytes, withoutResponse: true).catchError((e) {
-        debugPrint("JSON write (wwr) failed: $e");
-      });
+    if (c == null) {
+      debugPrint("sendJson: helloChar is null — write dropped");
+      return;
+    }
+    final json = jsonEncode(payload);
+    final bytes = utf8.encode(json);
+    debugPrint("sendJson → $json  (write=${c.properties.write} wwr=${c.properties.writeWithoutResponse})");
+    try {
+      if (c.properties.write) {
+        await c.write(bytes, withoutResponse: false);
+        debugPrint("sendJson: write-with-response OK");
+      } else if (c.properties.writeWithoutResponse) {
+        // unreliable path — device may not receive this
+        debugPrint("sendJson: WARNING — falling back to write-without-response");
+        await c.write(bytes, withoutResponse: true);
+      } else {
+        debugPrint("sendJson: ERROR — characteristic has no write property");
+        _addMessage("JSON write failed: no write property on characteristic");
+      }
+    } catch (e) {
+      debugPrint("sendJson failed: $e");
+      _addMessage("JSON write failed: $e");
     }
   }
 
@@ -375,6 +436,8 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
           _streamPreAllocBuffer = null;
           _windowStart = 0;
           _windowRetries = 0;
+          _windowEnd = 0;
+          _lastHandledWindowEnd = -1;
           _receivedIndices.clear();
         });
       }
@@ -627,6 +690,7 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
   @override
   void dispose() {
     _keepAliveTimer?.cancel();
+    _windowAckTimer?.cancel();
     _notifySub?.cancel();
     _opusNotifySub?.cancel();
     _audioRecorder.dispose();
@@ -767,9 +831,9 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: _isReceivingStream ? null : _startAudioDownload,
-                      icon: const Icon(Icons.download),
-                      label: const Text('Download Audio from Device'),
+                      onPressed: _isReceivingStream ? null : _replayLastRecording,
+                      icon: const Icon(Icons.replay),
+                      label: const Text('Replay Last Recording'),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -958,15 +1022,11 @@ class _DeviceInfoPageState extends State<DeviceInfoPage> {
     return '$y-$m-$d $h.$min.$s';
   }
 
-  Future<void> _startAudioDownload() async {
-    if (_discoveredServices.isEmpty) {
-      _addMessage("Not ready: services not discovered yet.");
-      return;
-    }
-    await _setupOpusCharacteristic(_discoveredServices);
-    // Tell EVB to start streaming with our window size
+  Future<void> _replayLastRecording() async {
+    // Asks the EVB to re-transmit the last encoded recording from packet 0.
+    // Normal flow does not need this — the device auto-sends as soon as encoding completes.
     _sendJson({"cmd": "stream_start", "window": _windowSize});
-    _addMessage("Requested stream (window=$_windowSize)");
+    _addMessage("Requested replay (window=$_windowSize)");
   }
 
   Widget _buildDisconnectedUI() {
